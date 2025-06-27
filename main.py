@@ -22,7 +22,7 @@ except ImportError as e:
     if not os.path.exists("requirements.txt"):
         print("Downloading requirements.txt...")
         import requests
-        req = requests.get("https://raw.githubusercontent.com/JustAnotherArchivist/jailbreakchangelogs/main/requirements.txt")
+        req = requests.get("https://raw.githubusercontent.com/v3kmmw/InventoryDetector/refs/heads/main/requirements.txt")
         with open("requirements.txt", "w") as f:
             f.write(req.text)
     subprocess.check_call(["pip", "install", "-r", "requirements.txt"])
