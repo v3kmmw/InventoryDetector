@@ -1,6 +1,6 @@
 
 try:
-    import easyocr # type: ignore
+    import easyocr 
     import re
     from typing import List, Tuple
     from difflib import get_close_matches
@@ -16,17 +16,24 @@ try:
     import logging
     import colorlog
 except ImportError as e:
-    print(f"Failed to import: {e}, redownloading requirements...")
-    import subprocess
+    print(f"Failed to import: {e}, trying to redownload requirements...")
     import os
+    if not os.path.exists("db.py"):
+        print("Downloading database...")
+        import requests
+        req = requests.get("https://raw.githubusercontent.com/v3kmmw/InventoryDetector/refs/heads/main/db.py")
+        with open("db.py", "w") as f:
+            f.write(req.text)
     if not os.path.exists("requirements.txt"):
         print("Downloading requirements.txt...")
         import requests
         req = requests.get("https://raw.githubusercontent.com/v3kmmw/InventoryDetector/refs/heads/main/requirements.txt")
         with open("requirements.txt", "w") as f:
             f.write(req.text)
+    import subprocess
+
     subprocess.check_call(["pip", "install", "-r", "requirements.txt"])
-    import easyocr # type: ignore
+    import easyocr 
     import re
     import os
     from typing import List, Tuple
