@@ -1,0 +1,5 @@
+easyocr
+torch
+httpx
+tqdm
+colorlog
