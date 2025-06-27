@@ -1,3 +1,5 @@
 requirements.txt
 database.db
 *.pyc
+/models
+image.png

@@ -3,3 +3,5 @@ torch
 httpx
 tqdm
 colorlog
+pillow
+cachetools
