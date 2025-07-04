@@ -1,5 +1,7 @@
+print("Starting... (Do not cancel this!)")
 import os
 import re
+import sys
 import time
 import asyncio
 import random
@@ -12,7 +14,6 @@ from difflib import get_close_matches
 from typing import List
 
 try:
-    import easyocr
     import torch
     from PIL import Image
     import numpy as np
@@ -20,43 +21,39 @@ try:
     from tqdm import tqdm
     import colorlog
     import db
+    import easyocr
 except ImportError as e:
-    logging.error(f"Error importing dependencies: {e} | Attempting auto repair...")
-    try:
+    print(f"Missing dependency: {e.name}")
+    if input("Do you want to install missing packages? (yes/no): ").strip().lower() in ("yes", "y"):
         import subprocess, requests
-
         if not os.path.exists("db.py"):
             db_code = requests.get("https://raw.githubusercontent.com/v3kmmw/InventoryDetector/refs/heads/main/db.py").text
             with open("db.py", "w") as f:
                 f.write(db_code)
-
-        if not os.path.exists("requirements.txt"):
-            reqs = requests.get("https://raw.githubusercontent.com/v3kmmw/InventoryDetector/refs/heads/main/requirements.txt").text
-            with open("requirements.txt", "w") as f:
-                f.write(reqs)
-
-        subprocess.check_call(["pip", "install", "-r", "requirements.txt"])
-        import easyocr, torch, httpx, colorlog, db
-        from cachetools import TTLCache
-        from PIL import Image
-        import numpy as np
-        from tqdm import tqdm
-    except Exception as e:
-        logging.error(f"Auto repair failed: {e}")
-        exit(1)
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "https://raw.githubusercontent.com/v3kmmw/InventoryDetector/refs/heads/main/requirements.txt"])
+        os.execl(sys.executable, sys.executable, *sys.argv)
+    sys.exit(1)
 except KeyboardInterrupt:
-    exit(0)
+    print("User aborted.")
+    sys.exit(1)
 
 handler = colorlog.StreamHandler()
 handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s%(levelname)s:%(reset)s %(message)s"))
 logger = colorlog.getLogger("inventory")
 logger.addHandler(handler)
 logger.setLevel(logging.DEBUG)
-
 logger.warning("This is experimental software.")
 
+USE_EASYOCR = torch.cuda.is_available()
+reader = None
 database = db.Database()
 item_names: List[str] = []
+
+async def get_reader():
+    global reader
+    if reader is None and USE_EASYOCR:
+        reader = easyocr.Reader(['en'], gpu=True, model_storage_directory='./models')
+    return reader
 
 async def check_ack():
     await database.start()
@@ -77,7 +74,6 @@ def format_time(ts):
     d = datetime.datetime.fromtimestamp(ts)
     now = datetime.datetime.now()
     delta = now - d
-
     if delta.total_seconds() < 60:
         ago = f"{int(delta.total_seconds())} seconds ago"
     elif delta.total_seconds() < 3600:
@@ -89,7 +85,6 @@ def format_time(ts):
     else:
         days = int(delta.total_seconds() // 86400)
         ago = f"{days} day{'s' if days != 1 else ''} ago"
-
     suffix = "th" if 11 <= d.day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(d.day % 10, "th")
     formatted = d.strftime(f"%B {d.day}{suffix} %Y at %I:%M %p")
     return f"{formatted} | {ago}"
@@ -99,20 +94,16 @@ async def fetch_items():
     stripped_names = []
     async with httpx.AsyncClient() as client:
         items = (await client.get('https://api.jailbreakchangelogs.xyz/items/list')).json()
-        for i in tqdm(items, desc="Fetching", colour="green"):
+        for i in items:
             await database.save_item(i['name'], i, int(time.time()))
             original = i['name']
             stripped = original.replace(" ", "").upper()
             original_names.append(original)
             stripped_names.append(stripped)
-            time.sleep(random.uniform(0.005, 0.01))
-        logger.info(f"Fetched {len(original_names)} items")
         await database.insert(original_names, stripped_names, int(time.time()))
         global item_names
         item_names = stripped_names
         return stripped_names
-
-
 
 async def fetch_item(name: str):
     _name = await database.fetch_original_name(name)
@@ -129,13 +120,10 @@ async def fetch_item(name: str):
 
 async def fetch_cached():
     last = await database.get_last_updated()
-    if last is None:
-        return await fetch_items()
-    logger.info(f"Database last updated: {format_time(last)}")
     if last is None or int(time.time()) - last >= 300:
         logger.info("Updating database...")
         return await fetch_items()
-
+    logger.info(f"Database last updated: {format_time(last)}")
     rows = await database.fetch_names_only()
     if rows:
         global item_names
@@ -148,29 +136,35 @@ def is_dark_color(bbox, image: Image.Image, brightness_threshold=100):
     ys = [int(p[1]) for p in bbox]
     crop = image.crop((min(xs), min(ys), max(xs), max(ys)))
     arr = np.array(crop)
-
     if arr.size == 0:
         return False
-
     avg_rgb = np.mean(arr.reshape(-1, 3), axis=0)
     r, g, b = avg_rgb
     brightness = 0.299 * r + 0.587 * g + 0.114 * b
-    return brightness > brightness_threshold  
+    return brightness > brightness_threshold
 
 async def extract_items(image_path=None):
     if not item_names:
         await fetch_cached()
-
     image_path = image_path or input("Image path: ")
     if not os.path.exists(image_path):
         logger.error("Image not found.")
         return [], []
-
     img = Image.open(image_path).convert("RGB")
-    reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available(), model_storage_directory='./models')
-
     try:
-        results = reader.readtext(image_path)
+        if USE_EASYOCR:
+            results = (await get_reader()).readtext(image_path)
+        else:
+            import pytesseract
+            from pytesseract import Output
+            text_data = pytesseract.image_to_data(img, output_type=Output.DICT)
+            results = []
+            for i in range(len(text_data['text'])):
+                text = text_data['text'][i]
+                if text.strip():
+                    (x, y, w, h) = (text_data['left'][i], text_data['top'][i], text_data['width'][i], text_data['height'][i])
+                    bbox = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+                    results.append((bbox, text, 0.9))
     except Exception as e:
         logger.error(f"OCR failed: {e}")
         return [], []
@@ -178,8 +172,7 @@ async def extract_items(image_path=None):
     skip = [
         r'COLOR', r'INTRODUCTION', r'INTEGRATION', r'LIST', r'WAITING',
         r'TRADE', r'CHAT', r'DECLINE', r'ACCEPT',
-        r'EVERYDAY.*FUEL', r'ZOO\s?PM', r'\d{1,2}:\d{2}\s?[AP]M',
-        r'^[A-Z]{1,2}$'
+        r'EVERYDAY.*FUEL', r'ZOO\s?PM', r'\d{1,2}:\d{2}\s?[AP]M', r'^[A-Z]{1,2}$'
     ]
 
     detected_items = []
@@ -226,41 +219,42 @@ async def main():
             torch.cuda.set_device(0)
             torch.cuda.empty_cache()
             logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
-            
         else:
-            os_name = platform.system()       
+            os_name = platform.system()
             arch = platform.machine()
             if arch == "AMD64": arch = "x86_64"
-            os_version = platform.release()  
+            os_version = platform.release()
             url = f"https://developer.nvidia.com/cuda-downloads?target_os={os_name}&target_arch={arch}&target_version={os_version}&target_type=exe_local"
             logger.warning("CUDA not found.")
             logger.warning("CUDA uses your graphics card to run faster. You can still use this program without a GPU, but it will be slower.")
-            confirmation = input("Would you like to be sent to the download page? (yes/no): ").lower()
-            if confirmation in ("y", "yes"):
+            if input("Would you like to be sent to the download page? (yes/no): ").lower() in ("y", "yes"):
                 webbrowser.open(url)
                 logger.info("Opening download page...")
                 return
-            else:
-                logger.info("Skipping download page...")
+            logger.info("Skipping download page...")
 
         try:
             top, bottom = await extract_items(args.image)
-            if top or bottom:
-                logger.info("Top row items:")
-                for item in top:
-                    _item = await fetch_item(item)
-                    if _item is None:
-                        logger.warning(f"Item not found: {item}")
-                    else:
-                        logger.info(f"{_item['name']} - {_item['type']} | Cash Value: {_item['cash_value']} Duped Value: {_item['duped_value']}")
-                logger.info("Bottom row items:")
-                for item in bottom:
-                    _item = await fetch_item(item)
-                    if _item is None:
-                        logger.warning(f"Item not found: {item}")
-                    else:
-                        logger.info(f"{_item['name']} - {_item['type']} | Cash Value: {_item['cash_value']} Duped Value: {_item['duped_value']}")
-                logger.info("Thats all! More features will be added in the future.")
+            top_items, bottom_items = await asyncio.gather(
+                asyncio.gather(*(fetch_item(item) for item in top)),
+                asyncio.gather(*(fetch_item(item) for item in bottom))
+            )
+
+            logger.info("Top row items:")
+            for item in top_items:
+                if item:
+                    logger.info(f"{item['name']} - {item['type']} | Cash Value: {item['cash_value']} Duped Value: {item['duped_value']}")
+                else:
+                    logger.warning("Item not found.")
+
+            logger.info("Bottom row items:")
+            for item in bottom_items:
+                if item:
+                    logger.info(f"{item['name']} - {item['type']} | Cash Value: {item['cash_value']} Duped Value: {item['duped_value']}")
+                else:
+                    logger.warning("Item not found.")
+
+            logger.info("Thats all! More features will be added in the future.")
         except KeyboardInterrupt:
             logger.info("Exiting...")
             exit(0)
